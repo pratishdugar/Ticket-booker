@@ -1,0 +1,139 @@
+# TicketBooker configuration.
+# Values like ${NAME} or ${NAME:-default} are read from environment variables,
+# so keep API keys and personal IDs out of this file.
+
+agent:
+  model: claude-opus-5-5
+  effort: medium              # low | medium | high | xhigh | max
+  require_confirmation: true  # always ask before booking anything
+  max_steps: 25
+
+# People you book for. The agent refers to them by name or alias.
+travellers:
+  - name: Asha Sharma
+    aliases: [me, asha]
+    age: 32
+    gender: F
+    berth_preference: LB      # IRCTC: LB MB UB SL SU WS NP
+  - name: Rohan Sharma
+    aliases: [rohan]
+    age: 35
+    gender: M
+    berth_preference: UB
+
+contact:
+  email: ${TB_EMAIL:-}
+  phone: ${TB_PHONE:-}
+
+# What a "matching" ticket looks like. Hard limits reject options; the rest only affects ranking.
+preferences:
+  earliest_departure: "06:00"
+  latest_departure: "23:30"
+  accept_rac: true
+  accept_waitlist: true
+  max_waitlist: 15
+  preferred: []               # e.g. [Rajdhani, Vande Bharat]
+  avoid: []
+
+# Overrides per category (train, bus, flight, event, movie, other).
+category_preferences:
+  train:
+    classes: [3A, 2A, SL]     # allowed classes, most preferred first
+    max_price: 4000
+  flight:
+    max_price: 9000
+    max_duration_minutes: 240
+
+storage_path: ~/.ticketbooker/bookings.json
+
+providers:
+  # Offline demo data for every category - handy to try the agent. Remove once real providers work.
+  - name: demo
+    type: mock
+
+  # Indian Railways. IRCTC has no public API and forbids automated booking on its website, so:
+  #  - search/availability/PNR come from a rail-data API you subscribe to (map its fields below);
+  #  - booking_mode: handoff  -> the agent prepares everything, you finish on irctc.co.in;
+  #    booking_mode: api      -> only if you have an authorised booking API; add an endpoints.book.
+  - name: irctc
+    type: irctc
+    enabled: false            # set true after filling in your rail-data API
+    booking_mode: handoff
+    default_quota: GN
+    advance_reservation_days: 60
+    base_url: https://rail-data.example.com/v1
+    headers:
+      X-Api-Key: ${RAIL_API_KEY}
+    endpoints:
+      search:
+        method: GET
+        path: /trains/between
+        params:
+          from: "{query.origin}"
+          to: "{query.destination}"
+          date: "{query.date:%Y-%m-%d}"
+          class: "{query.travel_class}"
+          quota: "{query.quota}"
+        results: data                   # dotted path to the list of trains in the response
+        fields:                         # TicketOption field -> dotted path inside each item
+          option_id: id
+          number: train_number
+          title: train_name
+          departure: departure_time     # ISO datetime, or HH:MM (combined with the journey date)
+          arrival: arrival_time
+          travel_class: class
+          price: fare
+          availability: availability    # e.g. "AVAILABLE-0045", "RAC 12", "GNWL23/WL10"
+      availability:
+        method: GET
+        path: /availability
+        params:
+          train: "{option.attributes[number]}"
+          date: "{option.departure:%Y-%m-%d}"
+          class: "{option.travel_class}"
+          quota: "{option.attributes[quota]}"
+        results: data.0
+        fields:
+          availability: status
+          price: fare
+      status:                           # PNR status, used after you record the PNR
+        method: GET
+        path: "/pnr/{reference}"
+        results: data
+        fields:
+          status: booking_status
+
+  # Any other JSON API (bus, flights, events...) can be plugged in with type: http.
+  - name: my_bus_api
+    type: http
+    enabled: false
+    categories: [bus]
+    base_url: https://bus-api.example.com
+    headers:
+      Authorization: "Bearer ${BUS_API_KEY}"
+    endpoints:
+      search:
+        method: GET
+        path: /search
+        params: {source: "{query.origin}", destination: "{query.destination}", doj: "{query.date:%Y-%m-%d}"}
+        results: trips
+        fields:
+          option_id: trip_id
+          title: operator
+          departure: departs_at
+          arrival: arrives_at
+          price: fare.amount
+          seats_available: seats_left
+          availability: seats_left
+      book:
+        method: POST
+        path: /bookings
+        body:
+          trip_id: "{option.attributes[native_id]}"
+          passengers: "{passengers}"     # whole list, sent as JSON
+          email: "{contact.email}"
+          phone: "{contact.phone}"
+        fields:
+          reference: booking.pnr
+          status: booking.status
+          payment_url: booking.payment_link
